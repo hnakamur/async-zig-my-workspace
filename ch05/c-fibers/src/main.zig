@@ -2,7 +2,7 @@ const std = @import("std");
 
 const DEFAULT_STACK_SIZE = 1024 * 1024 * 2;
 const MAX_THREADS = 4;
-var RUNTIME: usize = 0;
+var RUNTIME: *Runtime = undefined;
 
 const Runtime = struct {
     threads: std.ArrayList(Thread),
@@ -29,8 +29,8 @@ const Runtime = struct {
         };
     }
 
-    fn init(self: *const Runtime) void {
-        RUNTIME = @intFromPtr(self);
+    fn init(self: *Runtime) void {
+        RUNTIME = self;
     }
 
     fn run(self: *Runtime) void {
@@ -102,8 +102,7 @@ const Runtime = struct {
 };
 
 fn guard() void {
-    const rt_ptr: *Runtime = @ptrFromInt(RUNTIME);
-    rt_ptr.tReturn();
+    RUNTIME.tReturn();
 }
 
 fn skip() callconv(.Naked) void {
@@ -111,8 +110,7 @@ fn skip() callconv(.Naked) void {
 }
 
 fn yieldThread() void {
-    const rt_ptr: *Runtime = @ptrFromInt(RUNTIME);
-    _ = rt_ptr.tYield();
+    _ = RUNTIME.tYield();
 }
 
 const State = enum {
