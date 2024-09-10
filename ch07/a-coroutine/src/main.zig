@@ -16,7 +16,7 @@ const PollState = union(PollStateTag) {
 const Future = struct {
     const VTable = struct {
         poll: *const fn (ctx: *anyopaque) PollState,
-        deinit: *const fn (ctx: *anyopaque) void,
+        destroy: *const fn (ctx: *anyopaque) void,
     };
 
     ptr: *anyopaque,
@@ -26,14 +26,16 @@ const Future = struct {
         return self.vtable.poll(self.ptr);
     }
 
-    fn deinit(self: Future) void {
-        self.vtable.deinit(self.ptr);
+    fn destroy(self: Future) void {
+        self.vtable.destroy(self.ptr);
     }
 };
 
 const Http = struct {
-    fn get(allocator: std.mem.Allocator, path: []const u8) HttpGetFuture {
-        return HttpGetFuture.new(allocator, path);
+    fn get(allocator: std.mem.Allocator, path: []const u8) !Future {
+        var fut_ptr = try allocator.create(HttpGetFuture);
+        fut_ptr.* = HttpGetFuture.new(allocator, path);
+        return fut_ptr.future();
     }
 };
 
@@ -54,9 +56,11 @@ const HttpGetFuture = struct {
         self.buffer.deinit();
     }
 
-    fn virtDeinit(ctx: *anyopaque) void {
+    fn destroy(ctx: *anyopaque) void {
         var self: *HttpGetFuture = @ptrCast(@alignCast(ctx));
+        const allocator = self.buffer.allocator;
         self.deinit();
+        allocator.destroy(self);
     }
 
     fn writeRequest(self: *HttpGetFuture) !void {
@@ -70,7 +74,7 @@ const HttpGetFuture = struct {
     fn future(self: *HttpGetFuture) Future {
         return .{ .ptr = self, .vtable = &.{
             .poll = poll,
-            .deinit = virtDeinit,
+            .destroy = destroy,
         } };
     }
 
@@ -149,8 +153,8 @@ const StateTag = enum {
 
 const State = union(StateTag) {
     start: void,
-    wait1: HttpGetFuture,
-    wait2: HttpGetFuture,
+    wait1: Future,
+    wait2: Future,
     resolved: void,
 };
 
@@ -173,24 +177,30 @@ const Coroutine = struct {
             switch (self.state) {
                 .start => {
                     std.debug.print("Program starting\n", .{});
-                    const fut1 = Http.get(self.allocator, "/600/HelloWorld1");
+                    const fut1 = Http.get(self.allocator, "/600/HelloWorld1") catch |err| {
+                        std.log.err("failed to create HttpGetFuture: {s}", .{@errorName(err)});
+                        @panic("panic since we omit error handling");
+                    };
                     self.state = .{ .wait1 = fut1 };
                 },
 
-                .wait1 => |*fut| switch (fut.future().poll()) {
+                .wait1 => |*fut| switch (fut.poll()) {
                     .ready => |txt| {
                         std.debug.print("{s}\n", .{txt});
-                        fut.deinit();
-                        const fut2 = Http.get(self.allocator, "/400/HelloWorld2");
+                        fut.destroy();
+                        const fut2 = Http.get(self.allocator, "/400/HelloWorld2") catch |err| {
+                            std.log.err("failed to create HttpGetFuture: {s}", .{@errorName(err)});
+                            @panic("panic since we omit error handling");
+                        };
                         self.state = .{ .wait2 = fut2 };
                     },
                     .not_ready => return .not_ready,
                 },
 
-                .wait2 => |*fut2| switch (fut2.future().poll()) {
+                .wait2 => |*fut2| switch (fut2.poll()) {
                     .ready => |txt2| {
                         std.debug.print("{s}\n", .{txt2});
-                        fut2.deinit();
+                        fut2.destroy();
                         self.state = .resolved;
                         return .{ .ready = "" };
                     },
@@ -202,30 +212,32 @@ const Coroutine = struct {
         }
     }
 
-    fn virtDeinit(ctx: *anyopaque) void {
+    fn destroy(ctx: *anyopaque) void {
         var self: *Coroutine = @ptrCast(@alignCast(ctx));
         self.deinit();
+        self.allocator.destroy(self);
     }
 
     fn future(self: *Coroutine) Future {
         return .{ .ptr = self, .vtable = &.{
             .poll = poll,
-            .deinit = virtDeinit,
+            .destroy = destroy,
         } };
     }
 };
 
-fn asyncMain(allocator: std.mem.Allocator) Coroutine {
-    return Coroutine.new(allocator);
+fn asyncMain(allocator: std.mem.Allocator) !Future {
+    var coro_ptr = try allocator.create(Coroutine);
+    coro_ptr.* = Coroutine.new(allocator);
+    return coro_ptr.future();
 }
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = general_purpose_allocator.allocator();
 
-    var coro = asyncMain(gpa);
-    defer coro.deinit();
-    const fut = coro.future();
+    var fut = try asyncMain(gpa);
+    defer fut.destroy();
     while (true) {
         switch (fut.poll()) {
             .not_ready => std.debug.print("Schedule other tasks\n", .{}),
